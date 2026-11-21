@@ -218,26 +218,28 @@ export function PreferencesScreen({
 
           <p style={{ margin: 0, fontSize: 13, color: 'var(--slate)' }}>{imgStatusNote}</p>
 
-          <button
-            type="button"
-            className="btn-secondary"
-            style={{ marginTop: 2 }}
-            disabled={isBusy || sync.mode === 'offline'}
-            onClick={() => void onRefreshCatalog()}
-          >
-            {isBusy ? (
-              <Loader2 size={17} className="spin" aria-hidden="true" />
-            ) : (
-              <RefreshCw size={17} aria-hidden="true" />
-            )}
-            <span>
-              {refreshingCatalog
-                ? 'Actualizando precios...'
-                : imgSync.status === 'syncing'
-                  ? 'Sincronizando fotos nuevas...'
-                  : 'Actualizar catálogo ahora'}
-            </span>
-          </button>
+          {!standalone && (
+            <button
+              type="button"
+              className="btn-secondary"
+              style={{ marginTop: 2 }}
+              disabled={isBusy || sync.mode === 'offline'}
+              onClick={() => void onRefreshCatalog()}
+            >
+              {isBusy ? (
+                <Loader2 size={17} className="spin" aria-hidden="true" />
+              ) : (
+                <RefreshCw size={17} aria-hidden="true" />
+              )}
+              <span>
+                {refreshingCatalog
+                  ? 'Actualizando precios...'
+                  : imgSync.status === 'syncing'
+                    ? 'Sincronizando fotos nuevas...'
+                    : 'Actualizar catálogo ahora'}
+              </span>
+            </button>
+          )}
         </div>
       </section>
 

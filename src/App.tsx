@@ -583,6 +583,19 @@ export function App() {
       });
 
       setGpsState('ok');
+      if (standaloneMode) {
+        const { latitude, longitude } = pos.coords;
+        const ranked = SEED_BRANCHES.map((b) => {
+          const dLat = (b.lat - latitude) * 111;
+          const dLng = (b.lng - longitude) * 91;
+          const km = Number(Math.hypot(dLat, dLng).toFixed(1));
+          return { ...b, distanceKm: km };
+        }).sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
+        setBranches(ranked);
+        setActiveBranch(ranked[0]);
+        setGpsMessage(`Sucursal más cercana detectada: ${ranked[0].name} (a ${ranked[0].distanceKm} km).`);
+        return;
+      }
       const liveBranches = await fetchNearbyDiaBranches(
         pos.coords.latitude,
         pos.coords.longitude
@@ -610,7 +623,7 @@ export function App() {
     } finally {
       setLocatingBranches(false);
     }
-  }, []);
+  }, [standaloneMode]);
 
   const showBottomNav = !selectedProduct && activeTab !== 'escaner';
   const totalOffersDisplay = Math.max(42, allProducts.filter((p) => p.discountPct > 0).length);
@@ -771,21 +784,23 @@ export function App() {
           <div className="sidebar-title">Escenarios de prueba</div>
           <p className="sidebar-caption">Probá variantes y consultas reales en un clic:</p>
           <div className="sidebar-actions">
-            <button
-              type="button"
-              className="sidebar-btn"
-              onClick={() => void handleForceRefresh()}
-              disabled={refreshingLive || isOffline}
-            >
-              <span>
-                {refreshingLive
-                  ? 'Sincronizando catálogo...'
-                  : imageSync.status === 'syncing'
-                    ? `Bajando fotos (${imagePct}%)...`
-                    : 'Actualizar catálogo + fotos'}
-              </span>
-              <RefreshCw size={15} className={refreshingLive ? 'spin' : undefined} aria-hidden="true" />
-            </button>
+            {!standaloneMode && (
+              <button
+                type="button"
+                className="sidebar-btn"
+                onClick={() => void handleForceRefresh()}
+                disabled={refreshingLive || isOffline}
+              >
+                <span>
+                  {refreshingLive
+                    ? 'Sincronizando catálogo...'
+                    : imageSync.status === 'syncing'
+                      ? `Bajando fotos (${imagePct}%)...`
+                      : 'Actualizar catálogo + fotos'}
+                </span>
+                <RefreshCw size={15} className={refreshingLive ? 'spin' : undefined} aria-hidden="true" />
+              </button>
+            )}
 
             <button
               type="button"
