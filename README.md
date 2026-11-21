@@ -6,7 +6,7 @@ Prototipo funcional de aplicación móvil progresiva (PWA) para asistir la compr
 
 ## Qué hace
 
-- **Escaneo en góndola:** lee códigos de barras (EAN-13, EAN-8, UPC, Code 128) y QR con la cámara trasera (con linterna y carga manual de EAN como alternativa).
+- **Escaneo en góndola:** lee códigos de barras (EAN-13, EAN-8, UPC, Code 128) y QR con la cámara trasera (con carga manual de EAN como alternativa).
 - **Precios y descuentos por sucursal:** muestra precio final, precio de lista, porcentaje de descuento y ahorro por unidad, con selector de sucursal y detección de locales cercanos por GPS.
 - **Lista de la visita:** registra los productos escaneados en el recorrido y calcula el total y el ahorro estimado.
 - **Ofertas e inicio:** buscador sobre el catálogo de Dia, ofertas filtrables por categoría y acceso a la tarjeta Club Dia.
@@ -18,7 +18,7 @@ Prototipo funcional de aplicación móvil progresiva (PWA) para asistir la compr
 - **Catálogo diario offline en IndexedDB (`src/storage/catalogDb.ts`):** al abrir la app sincroniza automáticamente una vez por día el catálogo (~5.000 productos) desde `/api/catalog` (con fallback al snapshot estático `/catalog.json`). Si hay señal, el escáner consulta el EAN en vivo con timeout corto; si se corta o tarda, resuelve al instante contra IndexedDB por clave EAN.
 - **Caché incremental de imágenes (`src/storage/imageCacheSync.ts`):** descarga en segundo plano miniaturas `160×160` en la Cache API, salteando las que ya están cacheadas y purgando las que dejaron de existir en el catálogo.
 - **Proxy y catálogo serverless en Vercel (`api/dia.ts`, `api/catalog.ts`):** proxea de forma acotada los endpoints públicos VTEX de Dia Online (búsqueda de productos, consulta por EAN y sucursales cercanas vía `pickup-points`) y consolida el catálogo diario con caché de 24 h en el edge.
-- **Integración con el dispositivo:** cámara trasera y decodificación de códigos con `html5-qrcode`, control de flash/linterna vía MediaTrack capabilities y geolocalización vía Geolocation API.
+- **Integración con el dispositivo:** cámara trasera y decodificación de códigos con `html5-qrcode`, y geolocalización vía Geolocation API.
 
 ## Stack
 

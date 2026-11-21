@@ -1077,7 +1077,7 @@
   z-index: 3;
   transform: translateZ(0);
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 10px;
 }
 
@@ -1094,11 +1094,6 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-}
-
-.scanner-glass-btn.active {
-  background: #FFFFFF;
-  color: var(--ink);
 }
 
 .scanner-sheet {

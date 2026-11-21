@@ -8,7 +8,6 @@ import {
   ListChecks,
   Loader2,
   X,
-  Zap,
 } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { Branch, Product, SyncStatus, VisitItem } from '../types/models';
@@ -61,8 +60,6 @@ export function ScannerScreen({
   const [cameraState, setCameraState] = useState<'starting' | 'active' | 'denied' | 'unavailable'>(
     'starting'
   );
-  const [torchOn, setTorchOn] = useState(false);
-  const [torchNote, setTorchNote] = useState<string | null>(null);
 
   const stopInstance = useCallback(async (inst: Html5Qrcode | null) => {
     if (!inst) return;
@@ -86,8 +83,6 @@ export function ScannerScreen({
   const startCamera = useCallback(async () => {
     const session = ++startSessionRef.current;
     setCameraState('starting');
-    setTorchOn(false);
-    setTorchNote(null);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setCameraState('unavailable');
@@ -171,39 +166,6 @@ export function ScannerScreen({
       void stopCamera();
     };
   }, [startCamera, stopCamera]);
-
-  const handleToggleTorch = async () => {
-    setTorchNote(null);
-    const inst = scannerRef.current;
-    if (!inst || cameraState !== 'active') {
-      setTorchNote('La linterna requiere la cámara trasera activa.');
-      return;
-    }
-    const next = !torchOn;
-    try {
-      const rawCaps = inst.getRunningTrackCapabilities() as Record<string, unknown>;
-      const torch = inst.getRunningTrackCameraCapabilities().torchFeature();
-      const supportsTorch = torch.isSupported() && rawCaps.torch !== false;
-      if (!supportsTorch) {
-        setTorchNote('Este navegador o cámara no permite activar el flash desde la web.');
-        return;
-      }
-      try {
-        await torch.apply(next);
-      } catch {
-        await inst.applyVideoConstraints({ torch: next } as MediaTrackConstraintSet);
-      }
-      setTorchOn(next);
-    } catch {
-      if (!next) {
-        // Fallback for Android HALs where turning torch off via applyConstraints fails
-        setTorchOn(false);
-        void startCamera();
-        return;
-      }
-      setTorchNote('Este navegador no permite activar el flash desde la web.');
-    }
-  };
 
   const totalCount = visitItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalEstimated = visitItems.reduce(
@@ -306,24 +268,9 @@ export function ScannerScreen({
               <span>Reintentar cámara</span>
             </button>
           )}
-
-          {torchNote && (
-            <div className="scanner-glass-pill" role="status" style={{ fontSize: 12, textAlign: 'center' }}>
-              {torchNote}
-            </div>
-          )}
         </div>
 
         <div className="scanner-actions-row">
-          <button
-            type="button"
-            className={`scanner-glass-btn${torchOn ? ' active' : ''}`}
-            onClick={() => void handleToggleTorch()}
-            aria-pressed={torchOn}
-          >
-            <Zap size={18} aria-hidden="true" />
-            <span>Linterna</span>
-          </button>
           <button type="button" className="scanner-glass-btn" onClick={onOpenManualEan}>
             <Keyboard size={18} aria-hidden="true" />
             <span>Escribir código</span>
