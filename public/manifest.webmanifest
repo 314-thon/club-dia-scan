@@ -1,0 +1,19 @@
+{
+  "name": "Club Dia — Asistente de Ahorro en Tienda",
+  "short_name": "Club Dia",
+  "description": "Escaneá productos en góndola, consultá descuentos vigentes por sucursal y revisá tu ahorro mensual.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F6F3",
+  "theme_color": "#F7F6F3",
+  "lang": "es-AR",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

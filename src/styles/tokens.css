@@ -1,0 +1,175 @@
+:root {
+  /* Palette — DESIGN.md v2 */
+  --bg-canvas: #F7F6F3;
+  --bg-paper: #FFFFFF;
+  --bg-stone: #EFEDE8;
+  --ink: #18181B;
+  --slate: #5C5E66;
+  --hairline: #E4E2DC;
+  --carmine: #C81E2B;
+  --carmine-press: #A81722;
+  --pine: #166B45;
+  --pine-tint: #EEF7F2;
+  --lock-pine: #22C55E;
+  --amber-ink: #92400E;
+  --amber-tint: #FEF3C7;
+  --amber-border: #F59E0B;
+  --scanner-obsidian: #141518;
+  --scanner-glass: rgba(20, 21, 24, 0.78);
+  --scanner-glass-border: rgba(255, 255, 255, 0.14);
+  --desktop-stage: #ECEAE3;
+
+  /* Typography */
+  --font-display: 'Outfit', system-ui, -apple-system, sans-serif;
+  --font-body: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Radii */
+  --radius-card: 16px;
+  --radius-btn: 14px;
+  --radius-pill: 999px;
+  --radius-thumb: 12px;
+
+  /* Touch targets & layout */
+  --target-size: 44px;
+  --target-primary: 48px;
+  --nav-height: 76px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background-color: var(--bg-canvas);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  scroll-padding-bottom: calc(var(--nav-height) + 20px + env(safe-area-inset-bottom, 0px));
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg-canvas);
+  color: var(--ink);
+  overflow-wrap: break-word;
+  min-block-size: 100dvh;
+}
+
+img,
+video {
+  max-inline-size: 100%;
+  block-size: auto;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  color: var(--ink);
+  text-wrap: balance;
+}
+
+p,
+li {
+  text-wrap: pretty;
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(button, a, input, select):focus-visible {
+  outline: 3px solid var(--carmine);
+  outline-offset: 2px;
+}
+
+/* Accessible touch target baseline */
+:where(
+  button:not(.compact-exempt),
+  select,
+  input:not([type='checkbox'], [type='radio']),
+  [role='button'],
+  nav a
+) {
+  min-block-size: var(--target-size);
+  min-inline-size: var(--target-size);
+}
+
+/* Native <dialog> — modern-web-guidance: dialog */
+dialog {
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 20px;
+  background: var(--bg-paper);
+  color: var(--ink);
+  width: min(374px, calc(100vw - 24px));
+  max-block-size: min(86dvh, 720px);
+  overflow: auto;
+}
+
+dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  background: rgba(20, 21, 24, 0.56);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+/* Native <input type="checkbox" switch> — modern-web-guidance: switch */
+input[type='checkbox'][switch] {
+  accent-color: var(--ink);
+  font-size: 26px;
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+input[type='checkbox'][switch].switch {
+  --switch-background: #D4D1C9;
+  --switch-thumb: #FFFFFF;
+  top: 0;
+}
+
+input[type='checkbox'][switch]:focus-visible {
+  outline: 3px solid var(--carmine);
+  outline-offset: 3px;
+}
+
+/* Numeric tabular typography */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
