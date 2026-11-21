@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'club-dia-shell-v2';
+const SHELL_CACHE = 'club-dia-shell-v3';
 const API_CACHE = 'club-dia-api-v2';
 const IMAGE_CACHE = 'club-dia-images-v1';
 
@@ -86,7 +86,23 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-While-Revalidate for same-origin app shell
+  // Network-First for HTML navigations so PWA updates apply on first reload
+  if (url.origin === self.location.origin && (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html')) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            caches.open(SHELL_CACHE).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request).then((c) => c || caches.match('/index.html')))
+    );
+    return;
+  }
+
+  // Stale-While-Revalidate for same-origin static assets
   if (url.origin === self.location.origin) {
     event.respondWith(
       caches.match(request).then((cached) => {

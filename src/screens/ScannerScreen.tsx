@@ -46,10 +46,17 @@ export function ScannerScreen({
   onDetectedCode,
   onClearNotFound,
 }: ScannerScreenProps) {
-  const readerDomId = useId().replace(/:/g, '');
+  const rawId = useId();
+  const readerDomId = `club-dia-reader-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const scannerRef = useRef<Html5Qrcode | null>(null);
+  const startSessionRef = useRef(0);
+  const onDetectedCodeRef = useRef(onDetectedCode);
   const lastScannedRef = useRef<{ code: string; at: number }>({ code: '', at: 0 });
   const mountedRef = useRef(true);
+
+  useEffect(() => {
+    onDetectedCodeRef.current = onDetectedCode;
+  }, [onDetectedCode]);
 
   const [cameraState, setCameraState] = useState<'starting' | 'active' | 'denied' | 'unavailable'>(
     'starting'
@@ -57,9 +64,7 @@ export function ScannerScreen({
   const [torchOn, setTorchOn] = useState(false);
   const [torchNote, setTorchNote] = useState<string | null>(null);
 
-  const stopCamera = useCallback(async () => {
-    const inst = scannerRef.current;
-    scannerRef.current = null;
+  const stopInstance = useCallback(async (inst: Html5Qrcode | null) => {
     if (!inst) return;
     try {
       if (inst.isScanning) {
@@ -71,7 +76,15 @@ export function ScannerScreen({
     }
   }, []);
 
+  const stopCamera = useCallback(async () => {
+    startSessionRef.current += 1;
+    const inst = scannerRef.current;
+    scannerRef.current = null;
+    await stopInstance(inst);
+  }, [stopInstance]);
+
   const startCamera = useCallback(async () => {
+    const session = ++startSessionRef.current;
     setCameraState('starting');
     setTorchOn(false);
     setTorchNote(null);
@@ -81,10 +94,17 @@ export function ScannerScreen({
       return;
     }
 
-    await stopCamera();
+    const prev = scannerRef.current;
+    scannerRef.current = null;
+    await stopInstance(prev);
 
+    if (!mountedRef.current || session !== startSessionRef.current) {
+      return;
+    }
+
+    let html5QrCode: Html5Qrcode | null = null;
     try {
-      const html5QrCode = new Html5Qrcode(readerDomId, {
+      html5QrCode = new Html5Qrcode(readerDomId, {
         verbose: false,
         formatsToSupport: [
           Html5QrcodeSupportedFormats.EAN_13,
@@ -112,18 +132,28 @@ export function ScannerScreen({
             return;
           }
           lastScannedRef.current = { code: decodedText, at: now };
-          void onDetectedCode(decodedText);
+          void onDetectedCodeRef.current(decodedText);
         },
         () => {
           // frame without barcode — expected
         }
       );
 
-      if (mountedRef.current) {
-        setCameraState('active');
+      if (!mountedRef.current || session !== startSessionRef.current) {
+        if (scannerRef.current === html5QrCode) {
+          scannerRef.current = null;
+        }
+        await stopInstance(html5QrCode);
+        return;
       }
+
+      setCameraState('active');
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (scannerRef.current === html5QrCode) {
+        scannerRef.current = null;
+      }
+      await stopInstance(html5QrCode);
+      if (!mountedRef.current || session !== startSessionRef.current) return;
       const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
       if (msg.includes('permission') || msg.includes('denied') || msg.includes('notallowed')) {
         setCameraState('denied');
@@ -131,7 +161,7 @@ export function ScannerScreen({
         setCameraState('unavailable');
       }
     }
-  }, [onDetectedCode, readerDomId, stopCamera]);
+  }, [readerDomId, stopInstance]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -149,14 +179,29 @@ export function ScannerScreen({
       setTorchNote('La linterna requiere la cámara trasera activa.');
       return;
     }
+    const next = !torchOn;
     try {
-      const next = !torchOn;
-      await inst.applyVideoConstraints({
-        advanced: [{ torch: next } as MediaTrackConstraintSet],
-      });
+      const rawCaps = inst.getRunningTrackCapabilities() as Record<string, unknown>;
+      const torch = inst.getRunningTrackCameraCapabilities().torchFeature();
+      const supportsTorch = torch.isSupported() && rawCaps.torch !== false;
+      if (!supportsTorch) {
+        setTorchNote('Este navegador o cámara no permite activar el flash desde la web.');
+        return;
+      }
+      try {
+        await torch.apply(next);
+      } catch {
+        await inst.applyVideoConstraints({ torch: next } as MediaTrackConstraintSet);
+      }
       setTorchOn(next);
     } catch {
-      setTorchNote('Este dispositivo no permite encender la linterna desde el navegador.');
+      if (!next) {
+        // Fallback for Android HALs where turning torch off via applyConstraints fails
+        setTorchOn(false);
+        void startCamera();
+        return;
+      }
+      setTorchNote('Este navegador no permite activar el flash desde la web.');
     }
   };
 
@@ -183,38 +228,33 @@ export function ScannerScreen({
         />
 
         <div
-          id={readerDomId}
           className={`scanner-video-host${cameraState === 'active' ? ' is-active' : ''}`}
-        />
+          aria-hidden="true"
+        >
+          <div id={readerDomId} className="scanner-video-mount" />
+        </div>
 
         <div className="scanner-top-overlay">
-          <div className="scanner-header-bar">
+          <div className="scanner-header-row">
             <button
               type="button"
-              className="icon-btn"
-              style={{ color: '#FFFFFF' }}
-              aria-label="Volver al inicio"
+              className="scanner-back-btn"
+              aria-label="Volver"
               onClick={onBack}
             >
               <ArrowLeft size={21} aria-hidden="true" />
             </button>
             <button
               type="button"
-              className="scanner-header-center"
+              className="scanner-branch-pill"
               onClick={onOpenBranches}
               aria-label={`Cambiar sucursal: ${branch.name}`}
             >
-              <div className="scanner-branch-name">{branch.name}</div>
-              <div className="scanner-branch-addr">{branch.address}</div>
-            </button>
-            <button
-              type="button"
-              className="icon-btn"
-              style={{ color: '#FFFFFF' }}
-              aria-label="Elegir otra sucursal"
-              onClick={onOpenBranches}
-            >
-              <ChevronRight size={21} aria-hidden="true" />
+              <span className="scanner-header-center">
+                <span className="scanner-branch-name">{branch.name}</span>
+                <span className="scanner-branch-addr">{branch.address}</span>
+              </span>
+              <ChevronRight size={20} style={{ flexShrink: 0, opacity: 0.85 }} aria-hidden="true" />
             </button>
           </div>
 
@@ -268,7 +308,7 @@ export function ScannerScreen({
           )}
 
           {torchNote && (
-            <div className="scanner-glass-pill" style={{ fontSize: 12 }}>
+            <div className="scanner-glass-pill" role="status" style={{ fontSize: 12, textAlign: 'center' }}>
               {torchNote}
             </div>
           )}

@@ -419,11 +419,17 @@ export function App() {
     [activeTab]
   );
 
-  const handleSelectTab = useCallback((tab: TabId) => {
-    setSelectedProduct(null);
-    setLastNotFoundEan(null);
-    setActiveTab(tab);
-  }, []);
+  const handleSelectTab = useCallback(
+    (tab: TabId) => {
+      if (tab === 'escaner' && activeTab !== 'escaner') {
+        setPreviousTab(activeTab);
+      }
+      setSelectedProduct(null);
+      setLastNotFoundEan(null);
+      setActiveTab(tab);
+    },
+    [activeTab]
+  );
 
   const handleOpenOffers = useCallback((filter = 'Todos') => {
     setOffersFilter(filter);
