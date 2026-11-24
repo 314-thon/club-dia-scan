@@ -40,6 +40,15 @@ export interface Product {
   availableQuantity?: number;
 }
 
+export type ScanIssueKind = 'not-found' | 'network' | 'weighable' | 'invalid-code';
+
+export interface ScanIssue {
+  kind: ScanIssueKind;
+  code: string;
+  title: string;
+  description: string;
+}
+
 export interface VisitItem {
   product: Product;
   quantity: number;
@@ -87,6 +96,7 @@ export interface CatalogSyncMeta {
   syncedAt: string;
   timeHHMM: string;
   snapshotVersion: string;
+  schemaVersion?: number;
   productCount: number;
   discountedCount: number;
   source: 'api-catalog' | 'static-snapshot';
@@ -124,6 +134,6 @@ export interface SyncStatus {
   liveProductsCount: number;
   catalogCount: number;
   imageSync: ImageSyncProgress;
-  gpsState: 'ok' | 'idle' | 'denied';
+  gpsState: 'ok' | 'approximate' | 'idle' | 'denied';
   errorMessage?: string;
 }

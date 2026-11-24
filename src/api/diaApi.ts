@@ -5,6 +5,11 @@ import { getEmbeddedCatalog, isStandaloneHtml } from '../utils/runtime';
 const CACHE_KEY_LAST_SYNC = 'clubdia_last_sync_v1';
 export const DEFAULT_THUMB_SIZE = 160;
 
+export type EanLookupOutcome =
+  | { status: 'found'; product: Product }
+  | { status: 'not-found' }
+  | { status: 'error'; reason: 'timeout' | 'network' | 'http'; message: string };
+
 interface VtexOffer {
   Price?: number;
   ListPrice?: number;
@@ -36,7 +41,9 @@ interface VtexPickupItem {
     address?: {
       street?: string;
       number?: string;
+      neighborhood?: string;
       city?: string;
+      state?: string;
       geoCoordinates?: [number, number];
     };
   };
@@ -112,11 +119,64 @@ function formatValidRange(): string {
   return `Del ${fmt(now)} al ${fmt(end)}`;
 }
 
-function normalizeVtexProduct(raw: VtexProduct): Product | null {
-  const sku = raw.items?.[0];
-  const offer = sku?.sellers?.[0]?.commertialOffer;
-  if (!raw.productName || !sku || !offer) return null;
+function findMatchingSkuAndOffer(
+  items: VtexItem[] | undefined,
+  targetEan?: string
+): { sku: VtexItem; offer: VtexOffer } | null {
+  if (!Array.isArray(items) || items.length === 0) return null;
 
+  const cleanTarget = targetEan ? targetEan.replace(/\D/g, '') : '';
+  const targetVariants = new Set<string>();
+  if (cleanTarget) {
+    targetVariants.add(cleanTarget);
+    if (cleanTarget.length === 13 && cleanTarget.startsWith('0')) {
+      targetVariants.add(cleanTarget.slice(1));
+    } else if (cleanTarget.length === 12) {
+      targetVariants.add(`0${cleanTarget}`);
+    }
+  }
+
+  const orderedSkus = cleanTarget
+    ? [
+        ...items.filter((it) => {
+          const skuDigits = (it.ean ?? '').replace(/\D/g, '');
+          return skuDigits && targetVariants.has(skuDigits);
+        }),
+        ...items.filter((it) => {
+          const skuDigits = (it.ean ?? '').replace(/\D/g, '');
+          return !skuDigits || !targetVariants.has(skuDigits);
+        }),
+      ]
+    : items;
+
+  for (const sku of orderedSkus) {
+    const sellers = sku.sellers ?? [];
+    // Preferir seller con stock disponible y precio > 0; si no, cualquier seller con precio > 0
+    let fallbackOffer: VtexOffer | null = null;
+    for (const seller of sellers) {
+      const offer = seller?.commertialOffer;
+      if (!offer || Math.round(offer.Price ?? 0) <= 0) continue;
+      if ((offer.AvailableQuantity ?? 0) > 0) {
+        return { sku, offer };
+      }
+      if (!fallbackOffer) {
+        fallbackOffer = offer;
+      }
+    }
+    if (fallbackOffer) {
+      return { sku, offer: fallbackOffer };
+    }
+  }
+
+  return null;
+}
+
+function normalizeVtexProduct(raw: VtexProduct, targetEan?: string): Product | null {
+  if (!raw.productName) return null;
+  const matched = findMatchingSkuAndOffer(raw.items, targetEan);
+  if (!matched) return null;
+
+  const { sku, offer } = matched;
   const price = Math.round(offer.Price ?? 0);
   const listPrice = Math.round(offer.ListPrice ?? price);
   if (price <= 0) return null;
@@ -126,10 +186,19 @@ function normalizeVtexProduct(raw: VtexProduct): Product | null {
   const savings = Math.max(0, effectiveList - price);
   const { category, subtitle } = mapCategory(raw.categories);
 
+  const rawSkuEan = (sku.ean ?? '').replace(/\D/g, '');
+  const canonicalEan =
+    rawSkuEan.length === 12 ? `0${rawSkuEan}` : rawSkuEan || targetEan || sku.itemId || '0000000000000';
+
+  const displayName =
+    (raw.items?.length ?? 0) > 1 && sku.nameComplete
+      ? sku.nameComplete.trim()
+      : raw.productName.trim();
+
   return {
-    id: `dia-${raw.productId ?? sku.itemId ?? sku.ean ?? Math.random()}`,
-    ean: sku.ean || sku.itemId || '0000000000000',
-    name: raw.productName.trim(),
+    id: `dia-${raw.productId ?? sku.itemId ?? canonicalEan}`,
+    ean: canonicalEan,
+    name: displayName,
     brand: raw.brand?.trim() || 'Dia',
     category,
     subtitle,
@@ -168,7 +237,11 @@ export function expandCatalogSnapshot(snapshot: CatalogSnapshot): Product[] {
 
     let imageUrl = FALLBACK_PRODUCT_IMG;
     if (compactImg) {
-      if (compactImg.startsWith('http://') || compactImg.startsWith('https://') || compactImg.startsWith('/')) {
+      if (
+        compactImg.startsWith('http://') ||
+        compactImg.startsWith('https://') ||
+        compactImg.startsWith('/')
+      ) {
         imageUrl = toVtexThumbUrl(compactImg, DEFAULT_THUMB_SIZE);
       } else {
         imageUrl = `${baseImg}${compactImg}`;
@@ -287,38 +360,147 @@ export async function searchDiaProducts(query: string, signal?: AbortSignal): Pr
   const data = (await res.json()) as VtexProduct[];
   if (!Array.isArray(data)) return [];
 
-  return data.map(normalizeVtexProduct).filter((p): p is Product => p !== null);
+  return data.map((item) => normalizeVtexProduct(item)).filter((p): p is Product => p !== null);
+}
+
+async function fetchSingleEanAttempt(
+  eanDigits: string,
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): Promise<EanLookupOutcome> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+
+  try {
+    const res = await fetch(
+      `/api/dia/catalog_system/pub/products/search?fq=alternateIds_Ean:${encodeURIComponent(eanDigits)}`,
+      { headers: { Accept: 'application/json' }, signal: controller.signal }
+    );
+    if (!res.ok && res.status !== 206) {
+      return {
+        status: 'error',
+        reason: 'http',
+        message: `Dia Online respondió con código ${res.status}.`,
+      };
+    }
+    const data = (await res.json()) as VtexProduct[];
+    if (!Array.isArray(data) || data.length === 0) {
+      return { status: 'not-found' };
+    }
+    for (const raw of data) {
+      const normalized = normalizeVtexProduct(raw, eanDigits);
+      if (normalized) {
+        return { status: 'found', product: normalized };
+      }
+    }
+    return { status: 'not-found' };
+  } catch (err) {
+    if (externalSignal?.aborted) {
+      throw err;
+    }
+    if (timedOut) {
+      return {
+        status: 'error',
+        reason: 'timeout',
+        message: 'La consulta a Dia Online tardó demasiado.',
+      };
+    }
+    return {
+      status: 'error',
+      reason: 'network',
+      message: 'No pudimos conectar con Dia Online en este momento.',
+    };
+  } finally {
+    window.clearTimeout(timer);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
+/**
+ * Consulta un EAN en vivo contra Dia Online con timeout de 6 s, 1 reintento ante falla transitoria
+ * y soporte automático para variantes UPC-A (12 vs 13 dígitos).
+ */
+export async function lookupDiaByEanOutcome(
+  candidates: string | string[],
+  signal?: AbortSignal,
+  timeoutMs = 6000
+): Promise<EanLookupOutcome> {
+  const list = (Array.isArray(candidates) ? candidates : [candidates])
+    .map((c) => c.replace(/\D/g, ''))
+    .filter(Boolean);
+  if (list.length === 0) return { status: 'not-found' };
+
+  let lastError: EanLookupOutcome | null = null;
+
+  for (const ean of list) {
+    let outcome = await fetchSingleEanAttempt(ean, timeoutMs, signal);
+    if (outcome.status === 'error' && !signal?.aborted) {
+      // 1 reintento breve ante cold start o microcorte de señal móvil
+      outcome = await fetchSingleEanAttempt(ean, timeoutMs, signal);
+    }
+    if (outcome.status === 'found') {
+      return outcome;
+    }
+    if (outcome.status === 'error') {
+      lastError = outcome;
+    }
+  }
+
+  return lastError ?? { status: 'not-found' };
 }
 
 export async function lookupDiaByEan(
   ean: string,
   signal?: AbortSignal,
-  timeoutMs = 3800
+  timeoutMs = 6000
 ): Promise<Product | null> {
-  const clean = ean.replace(/\D/g, '');
-  if (!clean) return null;
+  const outcome = await lookupDiaByEanOutcome(ean, signal, timeoutMs);
+  return outcome.status === 'found' ? outcome.product : null;
+}
 
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  const onExternalAbort = () => controller.abort();
-  signal?.addEventListener('abort', onExternalAbort, { once: true });
+function formatStreetCase(raw: string): string {
+  const collapsed = raw.trim().replace(/\s+/g, ' ');
+  if (!collapsed) return '';
+  // Si viene todo en mayúsculas ("AV ALVAREZ THOMAS 3210"), pasar a Title Case legible
+  const isAllCaps = collapsed === collapsed.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/.test(collapsed);
+  const base = isAllCaps ? collapsed.toLowerCase() : collapsed;
+  const lowerWords = new Set(['de', 'del', 'la', 'las', 'el', 'los', 'y']);
 
-  try {
-    const res = await fetch(
-      `/api/dia/catalog_system/pub/products/search?fq=alternateIds_Ean:${encodeURIComponent(clean)}`,
-      { headers: { Accept: 'application/json' }, signal: controller.signal }
-    );
-    if (!res.ok) {
-      throw new Error(`Error al consultar EAN (${res.status})`);
-    }
-    const data = (await res.json()) as VtexProduct[];
-    if (!Array.isArray(data) || data.length === 0) return null;
+  return base
+    .split(' ')
+    .map((word, idx) => {
+      const clean = word.replace(/\.$/, '').toLowerCase();
+      if (clean === 'av' || clean === 'avenida') return 'Av.';
+      if (clean === 'gral' || clean === 'general') return 'Gral.';
+      if (clean === 'dr' || clean === 'doctor') return 'Dr.';
+      if (idx > 0 && lowerWords.has(clean)) return clean;
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(' ');
+}
 
-    return normalizeVtexProduct(data[0]);
-  } finally {
-    window.clearTimeout(timer);
-    signal?.removeEventListener('abort', onExternalAbort);
-  }
+function cleanPickupZone(friendlyName?: string): string {
+  if (!friendlyName) return '';
+  const stripped = friendlyName
+    .replace(/^Retiro\s+(?:en\s+tienda|al\s+auto)\s*[-–:]?\s*/i, '')
+    // Quita sufijos internos de tienda ("Villa Urquiza P", "Parque Chas P", "V")
+    .replace(/\s+[A-Z]$/i, '')
+    .trim();
+
+  if (stripped.length < 3) return '';
+  return formatStreetCase(stripped);
+}
+
+function cleanCityLabel(city?: string): string {
+  if (!city) return '';
+  if (/ciudad aut[oó]noma de buenos aires/i.test(city)) return 'CABA';
+  return city.trim();
 }
 
 export async function fetchNearbyDiaBranches(lat: number, lng: number): Promise<Branch[]> {
@@ -331,33 +513,110 @@ export async function fetchNearbyDiaBranches(lat: number, lng: number): Promise<
   const payload = (await res.json()) as { items?: VtexPickupItem[] };
   const items = payload.items ?? [];
 
-  const uniqueByName = new Map<string, Branch>();
-  for (const entry of items) {
-    const pp = entry.pickupPoint;
-    if (!pp?.friendlyName) continue;
-    const cleanedName = pp.friendlyName
-      .replace(/^Retiro\s+(en\s+tienda|al\s+auto)\s*/i, '')
-      .trim();
-    const displayName = cleanedName || pp.address?.city || pp.friendlyName;
-    const key = displayName.toLowerCase();
-    if (uniqueByName.has(key)) continue;
-
-    const street = [pp.address?.street, pp.address?.number].filter(Boolean).join(' ').trim();
-    const coords = pp.address?.geoCoordinates;
-
-    uniqueByName.set(key, {
-      id: `vtex-${pp.id ?? key}`,
-      name: displayName,
-      address: street || pp.address?.city || 'Sucursal Dia',
-      city: pp.address?.city || displayName,
-      lng: coords?.[0] ?? lng,
-      lat: coords?.[1] ?? lat,
-      distanceKm: typeof entry.distance === 'number' ? Number(entry.distance.toFixed(1)) : undefined,
-      source: 'dia-live',
-    });
-
-    if (uniqueByName.size >= 6) break;
+  // 1) Deduplicar por grilla geográfica (~30 m) para unificar ej. "Monroe 4880" y "Avenida Monroe 4880"
+  //    conservando la variante que tenga mejor nombre de barrio/zona.
+  interface RawCandidate {
+    id: string;
+    zone: string;
+    street: string;
+    city: string;
+    lat: number;
+    lng: number;
+    distanceKm?: number;
   }
 
-  return Array.from(uniqueByName.values());
+  const byLocation = new Map<string, RawCandidate>();
+
+  for (const entry of items) {
+    const pp = entry.pickupPoint;
+    if (!pp) continue;
+
+    const rawStreet = [pp.address?.street, pp.address?.number].filter(Boolean).join(' ').trim();
+    const street = formatStreetCase(rawStreet);
+    const zone = cleanPickupZone(pp.friendlyName) || formatStreetCase(pp.address?.neighborhood ?? '');
+    const city = cleanCityLabel(pp.address?.city);
+    const coords = pp.address?.geoCoordinates;
+    const itemLng = coords?.[0] ?? lng;
+    const itemLat = coords?.[1] ?? lat;
+
+    if (!street && !zone && !city) continue;
+
+    // Clave por coordenadas a ~11-30 m (4 decimales ~11 m; 3 decimales ~110 m -> redondeamos a 0.0003 ~33 m)
+    const latBucket = Math.round(itemLat / 0.0003);
+    const lngBucket = Math.round(itemLng / 0.0003);
+    const locKey = coords
+      ? `geo:${latBucket}:${lngBucket}`
+      : `addr:${street.toLowerCase()}:${city.toLowerCase()}`;
+
+    const distanceKm =
+      typeof entry.distance === 'number' ? Number(entry.distance.toFixed(1)) : undefined;
+
+    const existing = byLocation.get(locKey);
+    if (existing) {
+      // Si el duplicado aporta el nombre del barrio que faltaba, enriquecerlo
+      if (!existing.zone && zone) {
+        existing.zone = zone;
+      }
+      if (!existing.street && street) {
+        existing.street = street;
+      }
+      continue;
+    }
+
+    byLocation.set(locKey, {
+      id: `vtex-${pp.id ?? locKey}`,
+      zone,
+      street,
+      city,
+      lat: itemLat,
+      lng: itemLng,
+      distanceKm,
+    });
+
+    if (byLocation.size >= 8) break;
+  }
+
+  // 2) Construir títulos claros sin perder sucursales del mismo barrio:
+  //    Dirección como referencia inequívoca + barrio/localidad visible.
+  const usedNames = new Set<string>();
+  const branches: Branch[] = [];
+
+  for (const item of byLocation.values()) {
+    let name = '';
+    let address = '';
+
+    if (item.zone && item.street) {
+      const zoneLower = item.zone.toLowerCase();
+      if (!usedNames.has(zoneLower)) {
+        name = item.zone;
+        address = item.city && item.city.toLowerCase() !== zoneLower
+          ? `${item.street}, ${item.city}`
+          : item.street;
+      } else {
+        name = `${item.zone} · ${item.street}`;
+        address = item.city || item.street;
+      }
+    } else if (item.street) {
+      name = item.street;
+      address = item.city || 'Sucursal Dia';
+    } else {
+      name = item.zone || item.city || 'Sucursal Dia';
+      address = item.city || 'Sucursal Dia';
+    }
+
+    usedNames.add(name.toLowerCase());
+
+    branches.push({
+      id: item.id,
+      name,
+      address,
+      city: item.city || item.zone || name,
+      lng: item.lng,
+      lat: item.lat,
+      distanceKm: item.distanceKm,
+      source: 'dia-live',
+    });
+  }
+
+  return branches;
 }

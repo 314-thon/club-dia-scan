@@ -8,10 +8,11 @@
     "build": "tsc -b && vite build",
     "build:standalone": "tsc -b && node scripts/build-standalone.mjs",
     "preview": "vite preview --host",
-    "sync-catalog": "node scripts/sync-catalog.mjs"
+    "sync-catalog": "node scripts/sync-catalog.mjs",
+    "sync:supermarkets": "node scripts/sync-supermarkets.mjs"
   },
   "dependencies": {
-    "html5-qrcode": "^2.3.8",
+    "barcode-detector": "^3.2.4",
     "input-switch-polyfill": "^1.0.0",
     "lucide-react": "^0.511.0",
     "react": "^19.1.0",

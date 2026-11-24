@@ -1,9 +1,11 @@
 {
   "rewrites": [
+    { "source": "/api/offline-bundle", "destination": "/api/offline-bundle" },
     { "source": "/api/catalog", "destination": "/api/catalog" },
+    { "source": "/api/geocode", "destination": "/api/geocode" },
     { "source": "/api/dia/:path*", "destination": "/api/dia?path=:path*" },
     {
-      "source": "/((?!api/|assets/|catalog\\.json|manifest\\.webmanifest|sw\\.js|icon\\.svg).*)",
+      "source": "/((?!api/|assets/|catalog\\.json|offline-bundle\\.json|manifest\\.webmanifest|sw\\.js|icon\\.svg|zxing_reader\\.wasm).*)",
       "destination": "/index.html"
     }
   ]

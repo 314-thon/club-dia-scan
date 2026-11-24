@@ -16,7 +16,7 @@ export function BranchBar({
 }: BranchBarProps) {
   const isOffline = sync.mode === 'offline';
   const isStale = sync.mode === 'stale';
-  const isGpsAlert = sync.gpsState === 'denied';
+  const isGpsAlert = sync.gpsState === 'denied' || sync.gpsState === 'approximate';
 
   const statusText = isOffline
     ? `${branch.address} · Sin señal · Precios guardados`

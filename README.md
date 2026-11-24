@@ -17,13 +17,13 @@ Prototipo funcional de aplicación móvil progresiva (PWA) para asistir la compr
 - **Instalable y con Service Worker (`public/manifest.webmanifest` y `public/sw.js`):** se instala en pantalla de inicio en modo `standalone`. El Service Worker precarga el shell de la app y combina *Network-First* para navegaciones y API (con fallback a caché si no hay red), *Cache-First* para miniaturas de productos y *Stale-While-Revalidate* para assets estáticos.
 - **Catálogo diario offline en IndexedDB (`src/storage/catalogDb.ts`):** al abrir la app sincroniza automáticamente una vez por día el catálogo (~5.000 productos) desde `/api/catalog` (con fallback al snapshot estático `/catalog.json`). Si hay señal, el escáner consulta el EAN en vivo con timeout corto; si se corta o tarda, resuelve al instante contra IndexedDB por clave EAN.
 - **Caché incremental de imágenes (`src/storage/imageCacheSync.ts`):** descarga en segundo plano miniaturas `160×160` en la Cache API, salteando las que ya están cacheadas y purgando las que dejaron de existir en el catálogo.
-- **Proxy y catálogo serverless en Vercel (`api/dia.ts`, `api/catalog.ts`):** proxea de forma acotada los endpoints públicos VTEX de Dia Online (búsqueda de productos, consulta por EAN y sucursales cercanas vía `pickup-points`) y consolida el catálogo diario con caché de 24 h en el edge.
-- **Integración con el dispositivo:** cámara trasera y decodificación de códigos con `html5-qrcode`, y geolocalización vía Geolocation API.
+- **Proxy y catálogo serverless en Vercel (`api/dia.ts`, `api/catalog.ts`, `api/geocode.ts`):** proxea de forma acotada los endpoints públicos VTEX de Dia Online (búsqueda de productos, consulta por EAN y sucursales cercanas vía `pickup-points`), geocodifica direcciones/barrios (Photon + USIG) y consolida el catálogo diario con caché de 24 h en el edge.
+- **Integración con el dispositivo:** cámara trasera a resolución nativa con `BarcodeDetector` del sistema y fallback offline ZXing-C++ WebAssembly (`barcode-detector`), y geolocalización de alta precisión vía Geolocation API.
 
 ## Stack
 
 - React 19 + TypeScript + Vite
-- `html5-qrcode` y `lucide-react`
+- `barcode-detector` (ZXing-C++ WASM) y `lucide-react`
 - IndexedDB, Cache API y Service Worker nativos
 - Vercel Serverless Functions
 

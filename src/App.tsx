@@ -5,7 +5,7 @@ import {
   fetchDailyCatalogSnapshot,
   fetchNearbyDiaBranches,
   loadLastSyncTime,
-  lookupDiaByEan,
+  lookupDiaByEanOutcome,
   saveLastSyncTime,
   searchDiaProducts,
 } from './api/diaApi';
@@ -40,12 +40,20 @@ import {
   CatalogSyncMeta,
   ImageSyncProgress,
   Product,
+  ScanIssue,
   SyncStatus,
   TabId,
   UserPreferences,
   VisitItem,
 } from './types/models';
 import { formatSyncDateLabel, formatTimeHHMM, getLocalDateKey } from './utils/format';
+import {
+  formatAccuracyLabel,
+  GeocodeCandidate,
+  GeoLookupError,
+  getBestPosition,
+} from './utils/geo';
+import { parseScannedGtin } from './utils/gtin';
 import { isStandaloneHtml } from './utils/runtime';
 
 const ScannerScreen = lazy(() =>
@@ -55,6 +63,9 @@ const ScannerScreen = lazy(() =>
 const VISIT_STORAGE_KEY = 'clubdia_visit_items_v1';
 const PREFS_STORAGE_KEY = 'clubdia_preferences_v1';
 const BRANCH_STORAGE_KEY = 'clubdia_active_branch_v1';
+const BRANCHES_LIST_STORAGE_KEY = 'clubdia_branches_list_v1';
+const SAVED_ADDRESS_STORAGE_KEY = 'clubdia_saved_address_v1';
+const CATALOG_SCHEMA_VERSION = 2;
 
 const INITIAL_IMAGE_SYNC: ImageSyncProgress = {
   status: 'idle',
@@ -98,10 +109,63 @@ function loadStoredBranch(): Branch {
   try {
     const raw = localStorage.getItem(BRANCH_STORAGE_KEY);
     if (!raw) return SEED_BRANCHES[0];
-    return JSON.parse(raw) as Branch;
+    const parsed = JSON.parse(raw) as Branch;
+    return parsed && typeof parsed.name === 'string' ? parsed : SEED_BRANCHES[0];
   } catch {
     return SEED_BRANCHES[0];
   }
+}
+
+function mergeBranchList(primary: Branch[], active?: Branch): Branch[] {
+  const seen = new Set<string>();
+  const out: Branch[] = [];
+
+  const pushUnique = (b: Branch) => {
+    const key = `${b.id}|${b.name.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(b);
+  };
+
+  if (active) pushUnique(active);
+  for (const b of primary) pushUnique(b);
+  for (const seed of SEED_BRANCHES) {
+    if (!out.some((existing) => existing.name.toLowerCase() === seed.name.toLowerCase())) {
+      pushUnique(seed);
+    }
+  }
+  return out;
+}
+
+function loadStoredBranches(initialActive: Branch): Branch[] {
+  try {
+    const raw = localStorage.getItem(BRANCHES_LIST_STORAGE_KEY);
+    if (!raw) return mergeBranchList(SEED_BRANCHES, initialActive);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return mergeBranchList(SEED_BRANCHES, initialActive);
+    }
+    return mergeBranchList(parsed as Branch[], initialActive);
+  } catch {
+    return mergeBranchList(SEED_BRANCHES, initialActive);
+  }
+}
+
+function loadSavedAddressLabel(): string {
+  try {
+    return localStorage.getItem(SAVED_ADDRESS_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function rankSeedBranchesByCoords(lat: number, lng: number): Branch[] {
+  return SEED_BRANCHES.map((b) => {
+    const dLat = (b.lat - lat) * 111;
+    const dLng = (b.lng - lng) * 91;
+    const km = Number(Math.hypot(dLat, dLng).toFixed(1));
+    return { ...b, distanceKm: km };
+  }).sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
 }
 
 export function App() {
@@ -110,9 +174,11 @@ export function App() {
   const [offersFilter, setOffersFilter] = useState<string>('Todos');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [dialog, setDialog] = useState<ActiveDialog>(null);
+  const [focusSearchSeq, setFocusSearchSeq] = useState(0);
 
-  const [branches, setBranches] = useState<Branch[]>(SEED_BRANCHES);
   const [activeBranch, setActiveBranch] = useState<Branch>(loadStoredBranch);
+  const [branches, setBranches] = useState<Branch[]>(() => loadStoredBranches(loadStoredBranch()));
+  const [savedAddressLabel, setSavedAddressLabel] = useState<string>(loadSavedAddressLabel);
   const [liveProducts, setLiveProducts] = useState<Product[]>([]);
   const [visitItems, setVisitItems] = useState<VisitItem[]>(loadStoredVisit);
   const [preferences, setPreferences] = useState<UserPreferences>(loadStoredPrefs);
@@ -122,13 +188,16 @@ export function App() {
   const [browserOffline, setBrowserOffline] = useState(!navigator.onLine);
   const [lastSyncTime, setLastSyncTime] = useState<string>(loadLastSyncTime);
   const [lastSyncDateKey, setLastSyncDateKey] = useState<string | undefined>(undefined);
+  const [lastSchemaVersion, setLastSchemaVersion] = useState<number | undefined>(undefined);
   const [imageSync, setImageSync] = useState<ImageSyncProgress>(INITIAL_IMAGE_SYNC);
-  const [gpsState, setGpsState] = useState<'ok' | 'idle' | 'denied'>('ok');
+  const [gpsState, setGpsState] = useState<'ok' | 'approximate' | 'idle' | 'denied'>('ok');
   const [gpsMessage, setGpsMessage] = useState<string | null>(null);
+  const [gpsMessageTone, setGpsMessageTone] = useState<'info' | 'warning'>('info');
   const [locatingBranches, setLocatingBranches] = useState(false);
   const [refreshingLive, setRefreshingLive] = useState(false);
   const [lookingUpEan, setLookingUpEan] = useState(false);
-  const [lastNotFoundEan, setLastNotFoundEan] = useState<string | null>(null);
+  const [activeLookupCode, setActiveLookupCode] = useState<string | null>(null);
+  const [scanIssue, setScanIssue] = useState<ScanIssue | null>(null);
 
   const isOffline = simulatedOffline || browserOffline;
   const standaloneMode = isStandaloneHtml();
@@ -137,6 +206,10 @@ export function App() {
   const imageAbortRef = useRef<AbortController | null>(null);
   const liveProductsRef = useRef<Product[]>([]);
   const lastSyncDateKeyRef = useRef<string | undefined>(undefined);
+  const lastSchemaVersionRef = useRef<number | undefined>(undefined);
+  const selectedProductRef = useRef<Product | null>(null);
+  const lookupSeqRef = useRef(0);
+  const lookupAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     liveProductsRef.current = liveProducts;
@@ -145,6 +218,14 @@ export function App() {
   useEffect(() => {
     lastSyncDateKeyRef.current = lastSyncDateKey;
   }, [lastSyncDateKey]);
+
+  useEffect(() => {
+    lastSchemaVersionRef.current = lastSchemaVersion;
+  }, [lastSchemaVersion]);
+
+  useEffect(() => {
+    selectedProductRef.current = selectedProduct;
+  }, [selectedProduct]);
 
   // Merge Club Dia showcase products + full Dia catalog without duplicating EANs
   const allProducts = useMemo(() => {
@@ -217,12 +298,29 @@ export function App() {
     }
   }, [activeBranch]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(BRANCHES_LIST_STORAGE_KEY, JSON.stringify(branches));
+    } catch {
+      // ignore
+    }
+  }, [branches]);
+
+  useEffect(() => {
+    try {
+      if (savedAddressLabel) {
+        localStorage.setItem(SAVED_ADDRESS_STORAGE_KEY, savedAddressLabel);
+      }
+    } catch {
+      // ignore
+    }
+  }, [savedAddressLabel]);
+
   const runIncrementalImages = useCallback(async (products: Product[], dateKey: string) => {
     imageAbortRef.current?.abort();
     const controller = new AbortController();
     imageAbortRef.current = controller;
 
-    // Order URLs with discounted products first so visible offers cache earliest
     const urls = products.map((p) => p.imageUrl);
     const finalProgress = await syncProductImagesIncremental(urls, {
       dateKey,
@@ -260,6 +358,7 @@ export function App() {
           syncedAt: now.toISOString(),
           timeHHMM,
           snapshotVersion: snapshot.version,
+          schemaVersion: CATALOG_SCHEMA_VERSION,
           productCount: expanded.length,
           discountedCount: snapshot.discountedCount,
           source,
@@ -270,6 +369,8 @@ export function App() {
         setLastSyncTime(timeHHMM);
         setLastSyncDateKey(todayKey);
         lastSyncDateKeyRef.current = todayKey;
+        setLastSchemaVersion(CATALOG_SCHEMA_VERSION);
+        lastSchemaVersionRef.current = CATALOG_SCHEMA_VERSION;
         saveLastSyncTime(timeHHMM);
 
         await saveCatalogSnapshotToDb(expanded, meta);
@@ -321,6 +422,8 @@ export function App() {
         setLastSyncTime(storedMeta.timeHHMM);
         setLastSyncDateKey(storedMeta.dateKey);
         lastSyncDateKeyRef.current = storedMeta.dateKey;
+        setLastSchemaVersion(storedMeta.schemaVersion);
+        lastSchemaVersionRef.current = storedMeta.schemaVersion;
       }
 
       if (!cancelled) {
@@ -334,7 +437,7 @@ export function App() {
     };
   }, []);
 
-  // 2. Daily automatic sync (once per day, regardless of Wi-Fi) + incremental photo resume
+  // 2. Daily automatic sync (once per day, or if schemaVersion bumped) + incremental photo resume
   useEffect(() => {
     if (!hydrated) return;
 
@@ -354,12 +457,11 @@ export function App() {
       const todayKey = getLocalDateKey();
       const existing = liveProductsRef.current;
       const syncedDate = lastSyncDateKeyRef.current;
+      const syncedSchema = lastSchemaVersionRef.current;
 
-      // Case A: first visit (empty IndexedDB) -> load fast static catalog immediately, then sync photos
       if (existing.length === 0) {
         const loaded = await syncCatalogSnapshot(false, !standaloneMode);
         if (cancelled || !loaded || standaloneMode) return;
-        // If deployed static snapshot is older than today, silently check /api/catalog for fresh daily prices
         const meta = await getCatalogSyncMeta();
         if (!cancelled && meta && meta.snapshotVersion !== todayKey) {
           void syncCatalogSnapshot(true, true);
@@ -369,13 +471,12 @@ export function App() {
 
       if (standaloneMode) return;
 
-      // Case B: new day since last sync -> daily update (JSON prices + incremental new/changed photos only)
-      if (syncedDate !== todayKey) {
+      // Nuevo día o actualización de esquema del catálogo (limpieza de códigos sin EAN)
+      if (syncedDate !== todayKey || syncedSchema !== CATALOG_SCHEMA_VERSION) {
         await syncCatalogSnapshot(true, true);
         return;
       }
 
-      // Case C: already synced today -> skip JSON; only resume images if any were left uncached
       const cov = await getCachedImageCoverage(existing.map((p) => p.imageUrl));
       if (cancelled) return;
       if (cov.missing > 0) {
@@ -403,6 +504,7 @@ export function App() {
   useEffect(() => {
     return () => {
       imageAbortRef.current?.abort();
+      lookupAbortRef.current?.abort();
     };
   }, []);
 
@@ -414,6 +516,7 @@ export function App() {
   const handleOpenProduct = useCallback(
     (product: Product) => {
       setPreviousTab(activeTab);
+      selectedProductRef.current = product;
       setSelectedProduct(product);
     },
     [activeTab]
@@ -424,14 +527,19 @@ export function App() {
       if (tab === 'escaner' && activeTab !== 'escaner') {
         setPreviousTab(activeTab);
       }
+      lookupAbortRef.current?.abort();
+      setLookingUpEan(false);
+      setActiveLookupCode(null);
+      selectedProductRef.current = null;
       setSelectedProduct(null);
-      setLastNotFoundEan(null);
+      setScanIssue(null);
       setActiveTab(tab);
     },
     [activeTab]
   );
 
   const handleOpenOffers = useCallback((filter = 'Todos') => {
+    selectedProductRef.current = null;
     setOffersFilter(filter);
     setSelectedProduct(null);
     setActiveTab('ofertas');
@@ -483,14 +591,42 @@ export function App() {
     });
   }, []);
 
-  const handleAddOrBumpVisit = useCallback((product: Product) => {
+  const handleAddToVisitIfMissing = useCallback((product: Product) => {
     setVisitItems((prev) => {
       const idx = prev.findIndex((i) => i.product.ean === product.ean);
       if (idx >= 0) {
-        return prev;
+        // Actualizar datos de precio por si refrescó en vivo sin alterar la cantidad elegida
+        const copy = [...prev];
+        copy[idx] = { ...copy[idx], product };
+        return copy;
       }
       return [{ product, quantity: 1, addedAt: formatTimeHHMM() }, ...prev];
     });
+  }, []);
+
+  const syncUpdatedProductEverywhere = useCallback((fresh: Product, matchedEans: string[]) => {
+    const eanSet = new Set([fresh.ean, ...matchedEans]);
+    void upsertProductInDb(fresh);
+
+    setLiveProducts((prev) => {
+      const idx = prev.findIndex((p) => eanSet.has(p.ean));
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = fresh;
+        return copy;
+      }
+      return [fresh, ...prev];
+    });
+
+    setVisitItems((prev) =>
+      prev.map((item) => (eanSet.has(item.product.ean) ? { ...item, product: fresh } : item))
+    );
+
+    // Solo actualizar la ficha abierta si el usuario sigue viendo ese mismo producto
+    if (selectedProductRef.current && eanSet.has(selectedProductRef.current.ean)) {
+      selectedProductRef.current = fresh;
+      setSelectedProduct(fresh);
+    }
   }, []);
 
   const handleUpdateVisitQty = useCallback((ean: string, delta: number) => {
@@ -507,129 +643,314 @@ export function App() {
     setVisitItems((prev) => prev.filter((i) => i.product.ean !== ean));
   }, []);
 
-  const handleLookupEan = useCallback(
-    async (rawCode: string) => {
-      const clean = rawCode.replace(/\D/g, '');
-      if (!clean) return;
+  const showScanIssueSafely = useCallback((issue: ScanIssue) => {
+    // Nunca cerrar una ficha de producto ya abierta por una lectura rezagada
+    if (selectedProductRef.current) return;
+    setDialog(null);
+    setScanIssue(issue);
+    setActiveTab('escaner');
+  }, []);
 
+  const handleLookupEan = useCallback(
+    async (rawCode: string, formatHint?: string) => {
+      const rawDigits = rawCode.replace(/\D/g, '');
+      if (!rawDigits) return;
+
+      lookupAbortRef.current?.abort();
+      const seq = ++lookupSeqRef.current;
+      const controller = new AbortController();
+      lookupAbortRef.current = controller;
+
+      setScanIssue(null);
+
+      // 0) Compatibilidad inmediata con productos de vidriera / códigos de prueba en memoria
+      const directSeedHit = allProducts.find((p) => p.ean === rawDigits);
+      if (directSeedHit) {
+        setLookingUpEan(false);
+        setActiveLookupCode(null);
+        setDialog(null);
+        handleAddToVisitIfMissing(directSeedHit);
+        handleOpenProduct(directSeedHit);
+        return;
+      }
+
+      // 1) Validar estructura GTIN, dígito verificador y productos pesables
+      const parsed = parseScannedGtin(rawDigits, formatHint);
+
+      if (parsed.status === 'invalid') {
+        setLookingUpEan(false);
+        setActiveLookupCode(null);
+        showScanIssueSafely({
+          kind: 'invalid-code',
+          code: parsed.rawDigits,
+          title: 'Código de barras incompleto o inválido',
+          description:
+            parsed.reason === 'length'
+              ? 'El código debe tener 8, 12 o 13 números (EAN / UPC). Revisá los dígitos debajo de las barras.'
+              : 'Alguno de los dígitos no coincide con el verificador del envase. Revisá el número o volvé a escanear.',
+        });
+        return;
+      }
+
+      if (parsed.status === 'weighable') {
+        setLookingUpEan(false);
+        setActiveLookupCode(null);
+        showScanIssueSafely({
+          kind: 'weighable',
+          code: parsed.canonicalEan,
+          title: 'Producto de balanza (peso variable)',
+          description:
+            'Los frescos fraccionados en tienda (fiambres, carnes o verdulería) ya traen el importe final impreso en su etiqueta.',
+        });
+        return;
+      }
+
+      setActiveLookupCode(parsed.canonicalEan);
       setLookingUpEan(true);
-      setLastNotFoundEan(null);
 
       try {
-        // Online: try live Dia API first (with 3.8s timeout) and persist fresh price in IndexedDB
-        if (!isOffline && !standaloneMode) {
-          try {
-            const liveHit = await lookupDiaByEan(clean);
-            if (liveHit) {
-              void upsertProductInDb(liveHit);
-              setLiveProducts((prev) => {
-                const idx = prev.findIndex((p) => p.ean === liveHit.ean);
-                if (idx >= 0) {
-                  const copy = [...prev];
-                  copy[idx] = liveHit;
-                  return copy;
-                }
-                return [liveHit, ...prev];
-              });
-              setDialog(null);
-              handleAddOrBumpVisit(liveHit);
-              handleOpenProduct(liveHit);
-              return;
-            }
-          } catch {
-            // Fall through cleanly to instant IndexedDB offline lookup
+        // 2) Offline-first instantáneo: buscar en IndexedDB / memoria en <10 ms
+        let cachedHit: Product | null = null;
+        for (const cand of parsed.lookupCandidates) {
+          const fromDb = await getProductByEanFromDb(cand);
+          if (fromDb) {
+            cachedHit = fromDb;
+            break;
+          }
+          const fromMem = allProducts.find((p) => p.ean === cand);
+          if (fromMem) {
+            cachedHit = fromMem;
+            break;
           }
         }
 
-        // Offline or API fallback: O(1) lookup by EAN in IndexedDB across all ~5.000 Dia products
-        const dbHit = await getProductByEanFromDb(clean);
-        if (dbHit) {
+        if (seq !== lookupSeqRef.current || controller.signal.aborted) return;
+
+        if (cachedHit) {
+          setLookingUpEan(false);
+          setActiveLookupCode(null);
           setDialog(null);
-          handleAddOrBumpVisit(dbHit);
-          handleOpenProduct(dbHit);
+          handleAddToVisitIfMissing(cachedHit);
+          handleOpenProduct(cachedHit);
+
+          // Refresco silencioso en segundo plano para asegurar el precio en vivo de hoy
+          if (!isOffline && !standaloneMode) {
+            void lookupDiaByEanOutcome(parsed.lookupCandidates, undefined, 6000)
+              .then((outcome) => {
+                if (outcome.status === 'found') {
+                  syncUpdatedProductEverywhere(outcome.product, parsed.lookupCandidates);
+                }
+              })
+              .catch(() => {
+                // Conservar el precio cacheado si falla el refresco silencioso
+              });
+          }
           return;
         }
 
-        // Finally check showcase / in-memory products
-        const localHit = allProducts.find((p) => p.ean === clean);
-        if (localHit) {
-          setDialog(null);
-          handleAddOrBumpVisit(localHit);
-          handleOpenProduct(localHit);
+        // 3) Si no está en la base local y está offline, informar claramente
+        if (isOffline || standaloneMode) {
+          showScanIssueSafely({
+            kind: 'not-found',
+            code: parsed.canonicalEan,
+            title: 'No está en tus precios guardados',
+            description:
+              'Sin conexión solo podemos consultar los ~5.000 artículos sincronizados hoy. Conectate para buscarlo en vivo.',
+          });
           return;
         }
 
-        setDialog(null);
-        setLastNotFoundEan(clean);
-        setActiveTab('escaner');
-        setSelectedProduct(null);
+        // 4) Consulta en vivo a Dia Online con timeout de 6 s y 1 reintento
+        const outcome = await lookupDiaByEanOutcome(
+          parsed.lookupCandidates,
+          controller.signal,
+          6000
+        );
+
+        if (seq !== lookupSeqRef.current || controller.signal.aborted) return;
+
+        if (outcome.status === 'found') {
+          syncUpdatedProductEverywhere(outcome.product, parsed.lookupCandidates);
+          setDialog(null);
+          handleAddToVisitIfMissing(outcome.product);
+          handleOpenProduct(outcome.product);
+          return;
+        }
+
+        if (outcome.status === 'error') {
+          showScanIssueSafely({
+            kind: 'network',
+            code: parsed.canonicalEan,
+            title: 'Sin respuesta de Dia Online',
+            description:
+              'La consulta tardó demasiado o se cortó la señal, y este código no estaba en el catálogo guardado hoy.',
+          });
+          return;
+        }
+
+        showScanIssueSafely({
+          kind: 'not-found',
+          code: parsed.canonicalEan,
+          title: 'No encontramos este producto en Dia',
+          description:
+            'El código se leyó bien, pero este artículo no figura hoy en el catálogo de Dia Online (puede ser exclusivo de tienda física).',
+        });
       } finally {
-        setLookingUpEan(false);
+        if (seq === lookupSeqRef.current) {
+          setLookingUpEan(false);
+          setActiveLookupCode(null);
+        }
       }
     },
-    [allProducts, handleAddOrBumpVisit, handleOpenProduct, isOffline, standaloneMode]
+    [
+      allProducts,
+      handleAddToVisitIfMissing,
+      handleOpenProduct,
+      isOffline,
+      showScanIssueSafely,
+      standaloneMode,
+      syncUpdatedProductEverywhere,
+    ]
   );
 
   const handleLocateBranches = useCallback(async () => {
     setGpsMessage(null);
-    if (!navigator.geolocation) {
-      setGpsState('denied');
-      setGpsMessage('Tu navegador no soporta geolocalización. Elegí la sucursal de la lista.');
-      return;
-    }
-
     setLocatingBranches(true);
-    try {
-      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: false,
-          timeout: 8000,
-          maximumAge: 60000,
-        });
-      });
 
-      setGpsState('ok');
+    try {
+      const pos = await getBestPosition();
+
       if (standaloneMode) {
-        const { latitude, longitude } = pos.coords;
-        const ranked = SEED_BRANCHES.map((b) => {
-          const dLat = (b.lat - latitude) * 111;
-          const dLng = (b.lng - longitude) * 91;
-          const km = Number(Math.hypot(dLat, dLng).toFixed(1));
-          return { ...b, distanceKm: km };
-        }).sort((a, b) => (a.distanceKm ?? 999) - (b.distanceKm ?? 999));
+        const ranked = rankSeedBranchesByCoords(pos.lat, pos.lng);
         setBranches(ranked);
-        setActiveBranch(ranked[0]);
-        setGpsMessage(`Sucursal más cercana detectada: ${ranked[0].name} (a ${ranked[0].distanceKm} km).`);
+        if (pos.isApproximate) {
+          setGpsState('approximate');
+          setGpsMessageTone('warning');
+          setGpsMessage(
+            `Ubicación aproximada (${formatAccuracyLabel(
+              pos.accuracyMeters
+            )}). Elegí tu sucursal de la lista.`
+          );
+          setDialog({ type: 'branches', focusAddress: true });
+        } else {
+          setGpsState('ok');
+          setGpsMessageTone('info');
+          setActiveBranch(ranked[0]);
+          setGpsMessage(
+            `Sucursal más cercana detectada: ${ranked[0].name} (a ${ranked[0].distanceKm} km).`
+          );
+        }
         return;
       }
-      const liveBranches = await fetchNearbyDiaBranches(
-        pos.coords.latitude,
-        pos.coords.longitude
-      );
+
+      const liveBranches = await fetchNearbyDiaBranches(pos.lat, pos.lng);
+
+      if (pos.isApproximate) {
+        setGpsState('approximate');
+        setGpsMessageTone('warning');
+        if (liveBranches.length > 0) {
+          setBranches((prev) => mergeBranchList(liveBranches, prev[0]));
+        }
+        setGpsMessage(
+          `Tu navegador dio una ubicación aproximada (${formatAccuracyLabel(
+            pos.accuracyMeters
+          )}). Para no asignarte otro barrio, escribí tu dirección o barrio arriba.`
+        );
+        setDialog({ type: 'branches', focusAddress: true });
+        return;
+      }
+
+      setGpsState('ok');
+      setGpsMessageTone('info');
 
       if (liveBranches.length > 0) {
-        const merged = [
-          ...liveBranches,
-          ...SEED_BRANCHES.filter(
-            (seed) =>
-              !liveBranches.some((lb) => lb.name.toLowerCase() === seed.name.toLowerCase())
-          ),
-        ];
-        setBranches(merged);
+        const nextList = mergeBranchList(liveBranches, liveBranches[0]);
+        setBranches(nextList);
         setActiveBranch(liveBranches[0]);
-        setGpsMessage(`Detectamos ${liveBranches.length} sucursales Dia cerca de tu ubicación.`);
+        setGpsMessage(
+          `Ubicación precisa (${formatAccuracyLabel(pos.accuracyMeters)}) · Seleccionamos ${
+            liveBranches[0].name
+          }. Podés cambiarla en la lista.`
+        );
       } else {
-        setGpsMessage('No encontramos sucursales cercanas en Dia Online; podés elegir de la lista.');
+        setGpsMessageTone('warning');
+        setGpsMessage(
+          'No encontramos sucursales cercanas en Dia Online; probá escribir tu barrio o elegí de la lista.'
+        );
       }
-    } catch {
-      setGpsState('denied');
-      setGpsMessage(
-        'No pudimos acceder a tu ubicación. Podés elegir manualmente tu sucursal de la lista.'
+    } catch (err) {
+      setGpsMessageTone('warning');
+      if (err instanceof GeoLookupError) {
+        if (err.kind === 'permission-denied') {
+          setGpsState('denied');
+        }
+        setGpsMessage(err.message);
+      } else {
+        setGpsMessage(
+          'No pudimos consultar las sucursales cercanas ahora. Probá escribir tu dirección o barrio.'
+        );
+      }
+      setDialog((prev) =>
+        prev?.type === 'branches' ? prev : { type: 'branches', focusAddress: true }
       );
     } finally {
       setLocatingBranches(false);
     }
   }, [standaloneMode]);
+
+  const handleResolveAddressBranches = useCallback(
+    async (candidate: GeocodeCandidate) => {
+      const addressSummary = candidate.subtitle
+        ? `${candidate.label}, ${candidate.subtitle}`
+        : candidate.label;
+      setSavedAddressLabel(addressSummary);
+      setGpsMessage(null);
+      setLocatingBranches(true);
+
+      try {
+        if (standaloneMode) {
+          const ranked = rankSeedBranchesByCoords(candidate.lat, candidate.lng);
+          setBranches(ranked);
+          setActiveBranch(ranked[0]);
+          setGpsState('ok');
+          setGpsMessageTone('info');
+          setGpsMessage(`Mostrando sucursales cercanas a ${candidate.label}.`);
+          return;
+        }
+
+        const liveBranches = await fetchNearbyDiaBranches(candidate.lat, candidate.lng);
+        if (liveBranches.length > 0) {
+          const nextList = mergeBranchList(liveBranches, liveBranches[0]);
+          setBranches(nextList);
+          setActiveBranch(liveBranches[0]);
+          setGpsState('ok');
+          setGpsMessageTone('info');
+          setGpsMessage(
+            `Encontramos ${liveBranches.length} sucursales cerca de ${candidate.label}. Seleccionamos ${liveBranches[0].name}.`
+          );
+        } else {
+          setGpsMessageTone('warning');
+          setGpsMessage(
+            `No encontramos tiendas Dia cerca de ${candidate.label}. Probá con otra calle o localidad.`
+          );
+        }
+      } catch {
+        setGpsMessageTone('warning');
+        setGpsMessage('No pudimos consultar las sucursales de esa zona. Revisá tu conexión.');
+      } finally {
+        setLocatingBranches(false);
+      }
+    },
+    [standaloneMode]
+  );
+
+  const handleSearchByNameFromScanner = useCallback(() => {
+    selectedProductRef.current = null;
+    setSelectedProduct(null);
+    setScanIssue(null);
+    setActiveTab('inicio');
+    setFocusSearchSeq((n) => n + 1);
+  }, []);
 
   const showBottomNav = !selectedProduct && activeTab !== 'escaner';
   const totalOffersDisplay = Math.max(42, allProducts.filter((p) => p.discountPct > 0).length);
@@ -645,9 +966,14 @@ export function App() {
             branch={activeBranch}
             inVisitList={visitItems.some((i) => i.product.ean === selectedProduct.ean)}
             isStale={isOffline}
-            onBack={() => setSelectedProduct(null)}
-            onScanAnother={() => {
+            onBack={() => {
+              selectedProductRef.current = null;
               setSelectedProduct(null);
+            }}
+            onScanAnother={() => {
+              selectedProductRef.current = null;
+              setSelectedProduct(null);
+              setScanIssue(null);
               setActiveTab('escaner');
             }}
             onToggleVisitList={handleToggleVisitList}
@@ -660,6 +986,7 @@ export function App() {
             featuredDeals={SEED_PRODUCTS}
             totalOffersCount={totalOffersDisplay}
             habitualDealsCount={habitualProducts.length}
+            focusSearchSeq={focusSearchSeq}
             onOpenBranches={() => setDialog({ type: 'branches' })}
             onOpenCard={() => setDialog({ type: 'card' })}
             onOpenNotifications={() => setDialog({ type: 'notifications' })}
@@ -694,16 +1021,18 @@ export function App() {
               branch={activeBranch}
               sync={sync}
               visitItems={visitItems}
-              lastNotFoundEan={lastNotFoundEan}
+              scanIssue={scanIssue}
               lookingUpEan={lookingUpEan}
+              activeLookupCode={activeLookupCode}
               onBack={() => handleSelectTab(previousTab === 'escaner' ? 'inicio' : previousTab)}
               onOpenBranches={() => setDialog({ type: 'branches' })}
-              onOpenManualEan={() => setDialog({ type: 'manual-ean' })}
+              onOpenManualEan={(initialCode) => setDialog({ type: 'manual-ean', initialCode })}
+              onSearchByName={handleSearchByNameFromScanner}
               onOpenVisitList={() => setDialog({ type: 'visit-list' })}
               onRemoveVisitItem={handleRemoveVisitItem}
               onSelectProduct={handleOpenProduct}
               onDetectedCode={handleLookupEan}
-              onClearNotFound={() => setLastNotFoundEan(null)}
+              onClearScanIssue={() => setScanIssue(null)}
             />
           </Suspense>
         ) : activeTab === 'historial' ? (
@@ -723,6 +1052,7 @@ export function App() {
             onSelectProduct={handleOpenProduct}
             onOpenPrivacy={() => setDialog({ type: 'privacy' })}
             onOpenOffersForYou={() => handleOpenOffers('Para vos')}
+            onOpenBranches={() => setDialog({ type: 'branches', focusAddress: true })}
             onRequestLocation={handleLocateBranches}
             onRefreshCatalog={handleForceRefresh}
           />
@@ -737,12 +1067,16 @@ export function App() {
           activeBranch={activeBranch}
           onSelectBranch={(b) => {
             setActiveBranch(b);
+            setBranches((prev) => mergeBranchList(prev, b));
             setGpsState('ok');
           }}
           onLocateBranches={handleLocateBranches}
+          onResolveAddressBranches={handleResolveAddressBranches}
+          savedAddressLabel={savedAddressLabel}
           locatingBranches={locatingBranches}
           gpsMessage={gpsMessage}
-          onLookupEan={handleLookupEan}
+          gpsMessageTone={gpsMessageTone}
+          onLookupEan={(code) => handleLookupEan(code)}
           lookingUpEan={lookingUpEan}
           visitItems={visitItems}
           onUpdateVisitQty={handleUpdateVisitQty}
@@ -776,7 +1110,8 @@ export function App() {
             <div className="sidebar-stat">
               <span>Fotos 160×160</span>
               <strong className="mono">
-                {imageSync.cached.toLocaleString('es-AR')}/{imageSync.total.toLocaleString('es-AR')} ({imagePct}%)
+                {imageSync.cached.toLocaleString('es-AR')}/{imageSync.total.toLocaleString('es-AR')}{' '}
+                ({imagePct}%)
               </strong>
             </div>
           )}
@@ -804,7 +1139,11 @@ export function App() {
                       ? `Bajando fotos (${imagePct}%)...`
                       : 'Actualizar catálogo + fotos'}
                 </span>
-                <RefreshCw size={15} className={refreshingLive ? 'spin' : undefined} aria-hidden="true" />
+                <RefreshCw
+                  size={15}
+                  className={refreshingLive ? 'spin' : undefined}
+                  aria-hidden="true"
+                />
               </button>
             )}
 

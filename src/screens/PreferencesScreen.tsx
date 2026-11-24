@@ -21,6 +21,7 @@ interface PreferencesScreenProps {
   onSelectProduct: (product: Product) => void;
   onOpenPrivacy: () => void;
   onOpenOffersForYou: () => void;
+  onOpenBranches: () => void;
   onRequestLocation: () => Promise<void>;
   onRefreshCatalog: () => Promise<void>;
 }
@@ -36,6 +37,7 @@ export function PreferencesScreen({
   onSelectProduct,
   onOpenPrivacy,
   onOpenOffersForYou,
+  onOpenBranches,
   onRequestLocation,
   onRefreshCatalog,
 }: PreferencesScreenProps) {
@@ -268,17 +270,28 @@ export function PreferencesScreen({
           checked={preferences.branchArrivalAlert}
           onChange={handleToggleArrival}
           footer={
-            sync.gpsState === 'denied' ? (
-              <div className="amber-banner" style={{ marginTop: 10 }}>
-                <AlertTriangle
-                  size={17}
-                  style={{ flexShrink: 0, marginTop: 1 }}
-                  aria-hidden="true"
-                />
-                <span>
-                  El navegador bloqueó el acceso a ubicación. Podés elegir tu sucursal manualmente
-                  desde Inicio.
-                </span>
+            sync.gpsState === 'denied' || sync.gpsState === 'approximate' ? (
+              <div className="amber-banner" style={{ marginTop: 10, flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <AlertTriangle
+                    size={17}
+                    style={{ flexShrink: 0, marginTop: 1 }}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {sync.gpsState === 'denied'
+                      ? 'El navegador bloqueó el acceso a ubicación. Podés ingresar tu dirección o elegir sucursal manualmente.'
+                      : 'Tu ubicación actual es aproximada. Ingresá tu dirección o barrio para fijar la tienda correcta.'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  style={{ minBlockSize: 38, fontSize: 13 }}
+                  onClick={onOpenBranches}
+                >
+                  Ingresar dirección o elegir sucursal
+                </button>
               </div>
             ) : null
           }

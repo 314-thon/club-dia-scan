@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Bell,
@@ -19,6 +19,7 @@ interface HomeScreenProps {
   featuredDeals: Product[];
   totalOffersCount: number;
   habitualDealsCount: number;
+  focusSearchSeq?: number;
   onOpenBranches: () => void;
   onOpenCard: () => void;
   onOpenNotifications: () => void;
@@ -33,6 +34,7 @@ export function HomeScreen({
   featuredDeals,
   totalOffersCount,
   habitualDealsCount,
+  focusSearchSeq = 0,
   onOpenBranches,
   onOpenCard,
   onOpenNotifications,
@@ -44,6 +46,15 @@ export function HomeScreen({
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<Product[] | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (focusSearchSeq > 0) {
+      window.setTimeout(() => {
+        searchInputRef.current?.focus();
+      }, 60);
+    }
+  }, [focusSearchSeq]);
 
   useEffect(() => {
     const trimmed = query.trim();
@@ -98,11 +109,13 @@ export function HomeScreen({
 
       <BranchBar branch={branch} sync={sync} onOpenBranches={onOpenBranches} />
 
-      {sync.gpsState === 'denied' && (
+      {(sync.gpsState === 'denied' || sync.gpsState === 'approximate') && (
         <div className="amber-banner" role="status">
           <AlertTriangle size={18} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
           <span>
-            Ubicación desactivada. Tocá la sucursal de arriba para elegir tu tienda manualmente.
+            {sync.gpsState === 'denied'
+              ? 'Ubicación desactivada. Tocá la sucursal de arriba para ingresar tu domicilio o elegir tienda.'
+              : 'Ubicación aproximada. Tocá la sucursal de arriba para ingresar tu dirección o barrio exacto.'}
           </span>
         </div>
       )}
@@ -110,6 +123,7 @@ export function HomeScreen({
       <div className="search-box" role="search">
         <Search size={19} color="#5C5E66" aria-hidden="true" />
         <input
+          ref={searchInputRef}
           type="search"
           className="search-input"
           placeholder="Buscar producto o marca"

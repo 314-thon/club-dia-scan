@@ -165,6 +165,26 @@ function getArgentinaDateKey(date = new Date()): string {
   }).format(date);
 }
 
+function normalizeValidGtin(raw?: string): string | null {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, '');
+  const len = digits.length;
+  if (len !== 8 && len !== 12 && len !== 13 && len !== 14) return null;
+
+  let sum = 0;
+  let weight = 3;
+  for (let i = len - 2; i >= 0; i--) {
+    sum += (digits.charCodeAt(i) - 48) * weight;
+    weight = weight === 3 ? 1 : 3;
+  }
+  const expected = (10 - (sum % 10)) % 10;
+  if (expected !== digits.charCodeAt(len - 1) - 48) return null;
+
+  if (len === 12) return `0${digits}`;
+  if (len === 14 && digits.startsWith('0')) return digits.slice(1);
+  return digits;
+}
+
 export default async function handler(_req: VercelReq, res: VercelRes) {
   try {
     const { data: categories } = await fetchJson(`${BASE_API}/category/tree/1`);
@@ -183,15 +203,25 @@ export default async function handler(_req: VercelReq, res: VercelRes) {
         const brand = (raw.brand || 'Dia').trim();
 
         for (const sku of raw.items) {
-          const offer = sku?.sellers?.[0]?.commertialOffer;
+          const ean = normalizeValidGtin(sku.ean);
+          if (!ean) continue;
+
+          const sellers = sku?.sellers ?? [];
+          let offer = sellers.find(
+            (s) =>
+              (s.commertialOffer?.Price ?? 0) > 0 &&
+              (s.commertialOffer?.AvailableQuantity ?? 0) > 0
+          )?.commertialOffer;
+          if (!offer) {
+            offer = sellers.find((s) => (s.commertialOffer?.Price ?? 0) > 0)?.commertialOffer;
+          }
           if (!offer) continue;
+
           const price = Math.round(offer.Price ?? 0);
           if (price <= 0) continue;
 
           const listPriceRaw = Math.round(offer.ListPrice ?? price);
           const listPrice = listPriceRaw >= price ? listPriceRaw : price;
-          const ean = String(sku.ean || sku.itemId || '').replace(/\D/g, '');
-          if (!ean) continue;
 
           const avail = Math.round(offer.AvailableQuantity ?? 0);
           const existing = byEan.get(ean);

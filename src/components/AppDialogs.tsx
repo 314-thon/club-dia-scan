@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Check,
   Loader2,
@@ -10,17 +10,19 @@ import {
   Search,
   ShieldCheck,
   Trash2,
+  X,
 } from 'lucide-react';
 import { ModalDialog } from './ModalDialog';
 import { Branch, Product, Ticket, VisitItem } from '../types/models';
 import { QUICK_TEST_EANS } from '../data/seedData';
 import { calcBranchVariant, formatARS } from '../utils/format';
+import { GeocodeCandidate, geocodeAddress } from '../utils/geo';
 
 export type ActiveDialog =
   | null
   | { type: 'card' }
-  | { type: 'branches' }
-  | { type: 'manual-ean' }
+  | { type: 'branches'; focusAddress?: boolean }
+  | { type: 'manual-ean'; initialCode?: string }
   | { type: 'visit-list' }
   | { type: 'ticket'; ticket: Ticket }
   | { type: 'other-branches'; product: Product }
@@ -34,8 +36,11 @@ interface AppDialogsProps {
   activeBranch: Branch;
   onSelectBranch: (branch: Branch) => void;
   onLocateBranches: () => Promise<void>;
+  onResolveAddressBranches: (candidate: GeocodeCandidate) => Promise<void>;
+  savedAddressLabel: string;
   locatingBranches: boolean;
   gpsMessage: string | null;
+  gpsMessageTone?: 'info' | 'warning';
   onLookupEan: (ean: string) => Promise<void>;
   lookingUpEan: boolean;
   visitItems: VisitItem[];
@@ -52,8 +57,11 @@ export function AppDialogs({
   activeBranch,
   onSelectBranch,
   onLocateBranches,
+  onResolveAddressBranches,
+  savedAddressLabel,
   locatingBranches,
   gpsMessage,
+  gpsMessageTone = 'info',
   onLookupEan,
   lookingUpEan,
   visitItems,
@@ -63,6 +71,79 @@ export function AppDialogs({
   isOffline,
 }: AppDialogsProps) {
   const [eanInput, setEanInput] = useState('');
+  const [addressQuery, setAddressQuery] = useState('');
+  const [addressCandidates, setAddressCandidates] = useState<GeocodeCandidate[]>([]);
+  const [searchingAddress, setSearchingAddress] = useState(false);
+  const [addressError, setAddressError] = useState<string | null>(null);
+  const addressInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (dialog?.type === 'manual-ean') {
+      setEanInput(dialog.initialCode ?? '');
+    }
+  }, [dialog]);
+
+  useEffect(() => {
+    if (dialog?.type === 'branches') {
+      setAddressError(null);
+      setAddressCandidates([]);
+      if (dialog.focusAddress) {
+        window.setTimeout(() => {
+          addressInputRef.current?.focus();
+        }, 80);
+      }
+    }
+  }, [dialog]);
+
+  useEffect(() => {
+    if (dialog?.type !== 'branches' || isOffline) {
+      setSearchingAddress(false);
+      return;
+    }
+
+    const trimmed = addressQuery.trim();
+    if (trimmed.length < 3) {
+      setAddressCandidates([]);
+      setAddressError(null);
+      setSearchingAddress(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setSearchingAddress(true);
+    setAddressError(null);
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const items = await geocodeAddress(
+          trimmed,
+          { lat: activeBranch.lat, lng: activeBranch.lng },
+          controller.signal
+        );
+        if (!controller.signal.aborted) {
+          setAddressCandidates(items);
+          if (items.length === 0) {
+            setAddressError(
+              'No encontramos esa dirección. Probá con calle y altura o barrio (ej. Triunvirato 4933 o Villa Urquiza).'
+            );
+          }
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setAddressError('No pudimos buscar la dirección ahora. Revisá tu conexión.');
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setSearchingAddress(false);
+        }
+      }
+    }, 340);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [activeBranch.lat, activeBranch.lng, addressQuery, dialog?.type, isOffline]);
 
   const visitTotal = visitItems.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
   const visitSavings = visitItems.reduce(
@@ -72,11 +153,60 @@ export function AppDialogs({
 
   const handleManualSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleaned = eanInput.replace(/\D/g, '');
+    const cleaned = eanInput.trim();
     if (!cleaned) return;
     await onLookupEan(cleaned);
     setEanInput('');
   };
+
+  const handleAddressSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isOffline || locatingBranches) return;
+    if (addressCandidates.length > 0) {
+      const top = addressCandidates[0];
+      setAddressCandidates([]);
+      setAddressQuery('');
+      await onResolveAddressBranches(top);
+      return;
+    }
+    const trimmed = addressQuery.trim();
+    if (trimmed.length < 3) return;
+    setSearchingAddress(true);
+    setAddressError(null);
+    try {
+      const items = await geocodeAddress(trimmed, {
+        lat: activeBranch.lat,
+        lng: activeBranch.lng,
+      });
+      if (items.length === 0) {
+        setAddressError(
+          'No encontramos esa dirección. Probá con calle y altura o barrio (ej. Triunvirato 4933 o Villa Urquiza).'
+        );
+        return;
+      }
+      if (items.length === 1) {
+        setAddressQuery('');
+        setAddressCandidates([]);
+        await onResolveAddressBranches(items[0]);
+      } else {
+        setAddressCandidates(items);
+      }
+    } catch {
+      setAddressError('No pudimos buscar la dirección ahora. Revisá tu conexión.');
+    } finally {
+      setSearchingAddress(false);
+    }
+  };
+
+  // Si está sin conexión y escribe en el campo, permitimos filtrar las sucursales ya guardadas
+  const filteredBranches =
+    isOffline && addressQuery.trim().length >= 2
+      ? branches.filter((b) =>
+          `${b.name} ${b.address} ${b.city}`
+            .toLowerCase()
+            .includes(addressQuery.trim().toLowerCase())
+        )
+      : branches;
 
   return (
     <>
@@ -132,26 +262,122 @@ export function AppDialogs({
           style={{ opacity: locatingBranches || isOffline ? 0.65 : 1 }}
         >
           {locatingBranches ? (
-            <Loader2 size={18} aria-hidden="true" />
+            <Loader2 size={18} className="spin" aria-hidden="true" />
           ) : (
             <LocateFixed size={18} aria-hidden="true" />
           )}
           <span>
             {locatingBranches
-              ? 'Buscando sucursales cercanas...'
+              ? 'Obteniendo ubicación precisa...'
               : 'Detectar sucursal cercana por GPS'}
           </span>
         </button>
 
-        {gpsMessage && (
-          <div className="amber-banner" role="status">
-            <MapPin size={18} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
-            <span>{gpsMessage}</span>
+        <form onSubmit={handleAddressSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <label
+            htmlFor="branch-address-input"
+            style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--slate)' }}
+          >
+            {isOffline
+              ? 'Filtrar sucursales guardadas'
+              : 'O ingresá tu domicilio, esquina o barrio'}
+          </label>
+          <div className="search-box">
+            <MapPin size={18} color="#5C5E66" aria-hidden="true" />
+            <input
+              ref={addressInputRef}
+              id="branch-address-input"
+              type="text"
+              className="search-input"
+              placeholder={
+                isOffline
+                  ? 'Ej: Villa Urquiza o Triunvirato'
+                  : 'Ej: Triunvirato 4933 o Villa Urquiza'
+              }
+              value={addressQuery}
+              onChange={(e) => setAddressQuery(e.target.value)}
+            />
+            {searchingAddress && (
+              <Loader2 size={17} color="#5C5E66" className="spin" aria-hidden="true" />
+            )}
+            {addressQuery && !searchingAddress && (
+              <button
+                type="button"
+                className="search-clear"
+                aria-label="Limpiar dirección"
+                onClick={() => {
+                  setAddressQuery('');
+                  setAddressCandidates([]);
+                  setAddressError(null);
+                }}
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+          {savedAddressLabel && !addressQuery && (
+            <div style={{ fontSize: 12, color: 'var(--slate)' }}>
+              Última zona buscada: <strong>{savedAddressLabel}</strong>
+            </div>
+          )}
+        </form>
+
+        {!isOffline && addressCandidates.length > 0 && (
+          <div className="card-flush" role="listbox" aria-label="Direcciones sugeridas">
+            {addressCandidates.map((cand) => (
+              <button
+                key={cand.id}
+                type="button"
+                className="habitual-row"
+                onClick={() => {
+                  setAddressCandidates([]);
+                  setAddressQuery('');
+                  void onResolveAddressBranches(cand);
+                }}
+              >
+                <div style={{ minInlineSize: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)' }}>
+                    {cand.label}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: 'var(--slate)', marginTop: 1 }}>
+                    {cand.subtitle}
+                  </div>
+                </div>
+                <span className="source-tag">Buscar acá</span>
+              </button>
+            ))}
           </div>
         )}
 
+        {addressError && (
+          <div className="amber-banner" role="status">
+            <MapPin size={18} style={{ flexShrink: 0, marginTop: 1 }} aria-hidden="true" />
+            <span>{addressError}</span>
+          </div>
+        )}
+
+        {gpsMessage && (
+          <div
+            className={gpsMessageTone === 'warning' ? 'amber-banner' : 'pine-callout'}
+            style={gpsMessageTone === 'warning' ? undefined : { marginTop: 0, padding: '10px 12px' }}
+            role="status"
+          >
+            <MapPin
+              size={18}
+              color={gpsMessageTone === 'warning' ? undefined : '#166B45'}
+              style={{ flexShrink: 0, marginTop: 1 }}
+              aria-hidden="true"
+            />
+            <span style={{ fontSize: 13 }}>{gpsMessage}</span>
+          </div>
+        )}
+
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--slate)', marginTop: 2 }}>
+          Sucursales disponibles ({filteredBranches.length})
+        </div>
+
         <div className="card-flush">
-          {branches.map((branch) => {
+          {filteredBranches.map((branch) => {
             const selected = branch.id === activeBranch.id;
             return (
               <button
@@ -169,7 +395,9 @@ export function AppDialogs({
                   </div>
                   <div style={{ fontSize: 13, color: 'var(--slate)', marginTop: 2 }}>
                     {branch.address}
-                    {branch.distanceKm !== undefined ? ` · a ${branch.distanceKm} km` : ''}
+                    {branch.distanceKm !== undefined
+                      ? ` · a ${String(branch.distanceKm).replace('.', ',')} km`
+                      : ''}
                   </div>
                 </div>
                 {selected ? (
@@ -190,7 +418,7 @@ export function AppDialogs({
                     <Check size={16} strokeWidth={2.4} aria-hidden="true" />
                   </span>
                 ) : branch.source === 'dia-live' ? (
-                  <span className="source-tag">En vivo</span>
+                  <span className="source-tag">Cercana</span>
                 ) : null}
               </button>
             );
@@ -203,9 +431,13 @@ export function AppDialogs({
         title="Escribir código del producto"
         onClose={onClose}
       >
-        <form onSubmit={handleManualSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <form
+          onSubmit={handleManualSubmit}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+        >
           <label htmlFor="ean-input" style={{ fontSize: 13.5, color: 'var(--slate)' }}>
-            Ingresá el código de barras (EAN-13) que figura debajo de las líneas en el envase.
+            Ingresá el código de barras (EAN-13, EAN-8 o UPC-A) que figura debajo de las líneas en
+            el envase.
           </label>
           <div className="search-box">
             <Search size={18} color="#5C5E66" aria-hidden="true" />
@@ -213,11 +445,21 @@ export function AppDialogs({
               id="ean-input"
               className="search-input mono"
               inputMode="numeric"
-              placeholder="Ej: 7790742363008"
+              placeholder="Ej: 7791293048482"
               value={eanInput}
               onChange={(e) => setEanInput(e.target.value)}
               autoFocus
             />
+            {eanInput && (
+              <button
+                type="button"
+                className="search-clear"
+                aria-label="Borrar código"
+                onClick={() => setEanInput('')}
+              >
+                <X size={16} aria-hidden="true" />
+              </button>
+            )}
           </div>
           <button type="submit" className="btn-primary" disabled={lookingUpEan}>
             {lookingUpEan ? 'Consultando en Dia...' : 'Consultar precio'}
@@ -267,7 +509,10 @@ export function AppDialogs({
           <>
             <div className="card-flush">
               {visitItems.map((item) => (
-                <div key={item.product.ean} style={{ padding: 12, borderTop: '1px solid var(--hairline)' }}>
+                <div
+                  key={item.product.ean}
+                  style={{ padding: 12, borderTop: '1px solid var(--hairline)' }}
+                >
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                     <button
                       type="button"
@@ -304,7 +549,10 @@ export function AppDialogs({
                           <Minus size={16} aria-hidden="true" />
                         )}
                       </button>
-                      <span className="mono" style={{ minWidth: 20, textAlign: 'center', fontWeight: 700 }}>
+                      <span
+                        className="mono"
+                        style={{ minWidth: 20, textAlign: 'center', fontWeight: 700 }}
+                      >
                         {item.quantity}
                       </span>
                       <button
@@ -331,7 +579,10 @@ export function AppDialogs({
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: 12.5, color: 'var(--pine)' }}>Ahorro Club Dia</div>
-                <div className="mono" style={{ fontSize: 18, fontWeight: 700, color: 'var(--pine)' }}>
+                <div
+                  className="mono"
+                  style={{ fontSize: 18, fontWeight: 700, color: 'var(--pine)' }}
+                >
                   {formatARS(visitSavings)}
                 </div>
               </div>
@@ -410,7 +661,10 @@ export function AppDialogs({
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: 12.5, color: 'var(--pine)' }}>Ahorraste con Club Dia</div>
-                <div className="mono" style={{ fontSize: 18, fontWeight: 700, color: 'var(--pine)' }}>
+                <div
+                  className="mono"
+                  style={{ fontSize: 18, fontWeight: 700, color: 'var(--pine)' }}
+                >
                   {formatARS(dialog.ticket.saved)}
                 </div>
               </div>
@@ -421,12 +675,16 @@ export function AppDialogs({
 
       <ModalDialog
         open={dialog?.type === 'other-branches'}
-        title="Precio en otras sucursales"
+        title="Estimación en otras sucursales"
         onClose={onClose}
       >
         {dialog?.type === 'other-branches' && (
           <>
             <div style={{ fontSize: 14, fontWeight: 700 }}>{dialog.product.name}</div>
+            <p style={{ margin: 0, fontSize: 12.5, color: 'var(--slate)' }}>
+              Referencia basada en Dia Online y promociones simuladas por zona. En góndola puede
+              variar según cada local.
+            </p>
             <div className="card-flush">
               {branches.slice(0, 4).map((b) => {
                 const variant = calcBranchVariant(dialog.product, b.id);
@@ -437,7 +695,14 @@ export function AppDialogs({
                       <div style={{ fontSize: 12.5, color: 'var(--slate)' }}>{variant.note}</div>
                     </div>
                     <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          justifyContent: 'flex-end',
+                        }}
+                      >
                         <span className="mono" style={{ fontSize: 15, fontWeight: 700 }}>
                           {formatARS(variant.price)}
                         </span>
@@ -475,13 +740,15 @@ export function AppDialogs({
               3 habituales con descuento en {activeBranch.name}
             </div>
             <p style={{ margin: '4px 0 0', fontSize: 13.5, color: 'var(--slate)' }}>
-              Yerba Mate Playadito, Leche La Serenísima y Yogur Ser tienen cupón activo hasta el 23/11.
+              Yerba Mate Playadito, Leche La Serenísima y Yogur Ser tienen cupón activo hasta el
+              23/11.
             </p>
           </div>
           <div style={{ padding: 14, borderTop: '1px solid var(--hairline)' }}>
             <div style={{ fontSize: 14.5, fontWeight: 700 }}>Catálogo Dia sincronizado</div>
             <p style={{ margin: '4px 0 0', fontSize: 13.5, color: 'var(--slate)' }}>
-              Los precios escaneados quedan guardados en tu teléfono para consultarlos aunque pierdas señal en góndola.
+              Los precios escaneados quedan guardados en tu teléfono para consultarlos aunque pierdas
+              señal en góndola.
             </p>
           </div>
         </div>

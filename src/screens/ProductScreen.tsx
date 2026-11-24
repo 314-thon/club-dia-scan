@@ -96,7 +96,15 @@ export function ProductScreen({
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 14.5, color: 'var(--ink)' }}>
               {!hasPromo && <Store size={16} color="#5C5E66" aria-hidden="true" />}
               <span>
-                Precio de hoy en Sucursal <strong>{branch.name}</strong>
+                {product.source === 'dia-live' ? (
+                  <>
+                    Precio de referencia <strong>Dia Online</strong> · {branch.name}
+                  </>
+                ) : (
+                  <>
+                    Precio de hoy en Sucursal <strong>{branch.name}</strong>
+                  </>
+                )}
               </span>
             </div>
             {hasPromo && product.validRange && (
@@ -178,9 +186,9 @@ export function ProductScreen({
           onClick={() => onCompareBranches(product)}
         >
           <div>
-            <div style={{ fontSize: 15.5, fontWeight: 700 }}>Ver en otras sucursales</div>
+            <div style={{ fontSize: 15.5, fontWeight: 700 }}>Estimación en otras sucursales</div>
             <div style={{ fontSize: 13.5, color: 'var(--slate)', marginTop: 2 }}>
-              El descuento puede cambiar
+              Referencia basada en Dia Online · puede variar en tienda
             </div>
           </div>
           <ChevronRight size={20} color="#5C5E66" aria-hidden="true" />

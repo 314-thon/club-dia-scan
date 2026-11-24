@@ -1,4 +1,4 @@
-const SHELL_CACHE = 'club-dia-shell-v3';
+const SHELL_CACHE = 'club-dia-shell-v4';
 const API_CACHE = 'club-dia-api-v2';
 const IMAGE_CACHE = 'club-dia-images-v1';
 
@@ -7,6 +7,7 @@ const SHELL_ASSETS = [
   '/index.html',
   '/manifest.webmanifest',
   '/icon.svg',
+  '/zxing_reader.wasm',
   '/assets/aceite.jpg',
   '/assets/gondola.jpg',
   '/assets/higienol.jpg',
@@ -66,6 +67,12 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Network-only for live geocoding and dynamic API endpoints that should never enter SHELL_CACHE
+  if (url.origin === self.location.origin && url.pathname === '/api/geocode') {
+    event.respondWith(fetch(request));
+    return;
+  }
+
   // Network-First for Dia API & daily catalog JSON, with offline cache fallback
   if (
     url.pathname.startsWith('/api/dia/') ||
@@ -86,8 +93,16 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Do not put other /api/* endpoints into SHELL_CACHE
+  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) {
+    return;
+  }
+
   // Network-First for HTML navigations so PWA updates apply on first reload
-  if (url.origin === self.location.origin && (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html')) {
+  if (
+    url.origin === self.location.origin &&
+    (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html')
+  ) {
     event.respondWith(
       fetch(request)
         .then((response) => {
@@ -102,7 +117,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-While-Revalidate for same-origin static assets
+  // Stale-While-Revalidate for same-origin static assets (JS, CSS, WASM, icons)
   if (url.origin === self.location.origin) {
     event.respondWith(
       caches.match(request).then((cached) => {
